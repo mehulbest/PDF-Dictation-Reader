@@ -144,33 +144,83 @@ export default function PDFDictationReader() {
   };
 
   // ------------ Helpers for extraction ------------
-  const superscriptChar = (n: string) => ({ "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹" } as const)[n] || n;
+  const supers = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" } as const;
+  const superscriptChar = (n: string) => (supers as any)[n] || n;
 
-  // Merge lines like: "... x"  (next line) "2"   → "... x²"
+  // Re-attach superscripts when split across lines
   const mergeSuperscriptLines = (lines: string[]) => {
     const out: string[] = [];
     for (let i = 0; i < lines.length; i++) {
       const prev = out[out.length - 1];
       const cur = lines[i].trim();
-
-      // a single digit or ^digit line that likely belongs to previous variable
       const isSupLine = /^(\^?\d)$/.test(cur) || /^[²³⁴⁵⁶⁷⁸⁹]$/.test(cur);
-      const prevLooksLikeVar = prev && /[a-zA-Z]\s*$/.test(prev);
-
-      if (isSupLine && prevLooksLikeVar) {
-        if (/^[²³⁴⁵⁶⁷⁸⁹]$/.test(cur)) {
-          out[out.length - 1] = prev + cur; // already superscript
-        } else {
-          // "^2" or "2" → use superscript char
-          const n = cur.replace("^", "");
-          out[out.length - 1] = prev + superscriptChar(n);
-        }
+      const prevLooksLikeVarOrGroup = prev && (/[a-zA-Z]\s*$/.test(prev) || /\)\s*$/.test(prev));
+      if (isSupLine && prevLooksLikeVarOrGroup) {
+        if (/^[²³⁴⁵⁶⁷⁸⁹]$/.test(cur)) out[out.length - 1] = prev + cur;
+        else out[out.length - 1] = prev + superscriptChar(cur.replace("^",""));
       } else {
         out.push(lines[i]);
       }
     }
     return out;
   };
+
+// Fix inline artifacts within a line: dashes, fractions (incl. spaced underscores & vulgar fractions),
+// powers, and common “missing minus” cases
+const fixInlineMathArtifacts = (line: string) => {
+  let fixed = line;
+
+  // 0) Normalize dash variants that sometimes disappear in extraction
+  // U+2212 (−), en dash (–), em dash (—) -> hyphen-minus (-)
+  fixed = fixed.replace(/[−–—]/g, "-");
+
+  // 1) Normalize Unicode vulgar fractions to ASCII "a/b"
+  const vulgarMap: Record<string, string> = {
+    "¼": "1/4", "½": "1/2", "¾": "3/4",
+    "⅓": "1/3", "⅔": "2/3",
+    "⅕": "1/5", "⅖": "2/5", "⅗": "3/5", "⅘": "4/5",
+    "⅙": "1/6", "⅚": "5/6",
+    "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8",
+  };
+  fixed = fixed.replace(/[¼½¾⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, m => vulgarMap[m] || m);
+
+  // 2) Rebuild fractions drawn as separate glyphs
+  //    - "1 / 4" or "1/ 4" or "1 /4" -> "1/4"
+  fixed = fixed.replace(/(\d+)\s*\/\s*(\d+)/g, "$1/$2");
+  //    - "1__4" -> "1/4"
+  fixed = fixed.replace(/(\d+)_+(\d+)/g, "$1/$2");
+  //    - "1 _ _ 4" or "1 _   _  4" (underscores with spaces between) -> "1/4"
+  fixed = fixed.replace(/(\d+)(?:\s*_+\s*)+(\d+)/g, "$1/$2");
+
+  // 3) Merge powers when caret/digit are split: "x ^ 2" -> "x²"
+  fixed = fixed.replace(/([a-zA-Z])\s*\^\s*([0-9])\b/g, (m, v: string, pow: string) => {
+    const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
+    return v + (map[pow] || pow);
+  });
+
+  // 4) (… ) 2  -> (… )²   e.g., ( - 3 ) 2 -> ( - 3 )²
+  fixed = fixed.replace(/(\([^)]+\))\s*([0-9])\b/g, (m, base: string, pow: string) => {
+    const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
+    return base + (map[pow] || pow);
+  });
+
+  // 5) Inverse trig where the superscript minus gets dropped: "sin ¹(x)" -> "sin⁻¹(x)"
+  fixed = fixed.replace(/\b(sin|cos|tan)\s*¹\s*\(/gi, (m, fn) => `${fn}⁻¹(`);
+
+  // 6) Heuristics to restore missing minus in common patterns
+  //    (2x  5) -> (2x - 5), (x  1) -> (x - 1), |x  4| -> |x - 4|
+  fixed = fixed.replace(/\(([^)]*?\d[a-z]*)\s+(\d+)\)/g, "($1 - $2)");
+  fixed = fixed.replace(/\(([^)]*?[a-zA-Z])\s+(\d+)\)/g, "($1 - $2)");
+  fixed = fixed.replace(/\|x\s+(\d+)\|/g, (_m, d) => `|x - ${d}|`);
+  //    32 t  16 t² -> 32 t - 16 t²
+  fixed = fixed.replace(/(\d+)\s*([a-zA-Z])\s+(\d+)\s*([a-zA-Z])/g, "$1 $2 - $3 $4");
+  //    x  1) -> x - 1)
+  fixed = fixed.replace(/([a-zA-Z])\s+(\d+)\)/g, "$1 - $2)");
+
+  return fixed;
+};
+
+
 
   // ------------ PDF Text Extraction (robust, header/footer cleanup) ------------
   const extractTextFromPdf = async (file: File) => {
@@ -185,7 +235,7 @@ export default function PDFDictationReader() {
       const pdf = await (pdfjs as any).getDocument({ data: arrayBuf }).promise;
       setNumPages(pdf.numPages);
 
-      // 1) Build lines per page (group items by Y; slightly looser threshold to avoid splitting superscripts)
+      // 1) Build lines per page (group items by Y; looser threshold to avoid splitting superscripts)
       const pagesRawLines: string[][] = [];
       for (let p = 1; p <= pdf.numPages; p++) {
         const page = await pdf.getPage(p);
@@ -198,8 +248,9 @@ export default function PDFDictationReader() {
 
         const flush = () => {
           if (buff.length) {
-            const line = buff.join(" ").replace(/\s{2,}/g, " ").trim();
-            if (line) lines.push({ y: currentY!, text: line });
+            const raw = buff.join(" ").replace(/\s{2,}/g, " ").trim();
+            const fixed = fixInlineMathArtifacts(raw);
+            if (fixed) lines.push({ y: (currentY as number), text: fixed });
             buff = [];
           }
         };
@@ -209,11 +260,10 @@ export default function PDFDictationReader() {
           const tr = it.transform || it?.transformMatrix || [1, 0, 0, 1, 0, 0];
           const y = tr[5]; // baseline Y
 
-          // allow up to ~3.5px drift as same line (helps keep superscripts together)
-          if (currentY === null) currentY = y;
-          const newLine = Math.abs(y - (currentY ?? y)) > 3.5;
-
+          const newLine = Math.abs(y - (currentY ?? y)) > 3.5; // tolerant drift
           if (newLine) { flush(); currentY = y; }
+          else if (currentY === null) currentY = y;
+
           buff.push(str);
         }
         flush();
@@ -234,13 +284,13 @@ export default function PDFDictationReader() {
           .map(([line]) => line)
       );
 
-      // 3) Regex filters for obvious page junk
+      // 3) Regex filters for page junk
       const junkRegexes = [
         /(^|\s)Page\s*\d+(\s*of\s*\d+)?/i,     // Page 8 / Page 8 of 10
         /Unit\s*\d+_Book_\d+\.indb/i,          // InDesign footer file
         /~\/|[A-Z]:\\|desktop/i,               // file paths
-        /^\d{2,}\s*$/,                         // lone numbers (2+ digits), but keep single digits for powers
-        /^\d+\s+Algebra\s*1\s*•\s*Unit\s*\d+/i // "8 Algebra 1 • Unit 7 …" header
+        /^\d{2,}\s*$/,                         // lone big numbers (keep single digits for powers)
+        /^\d+\s+Algebra\s*1\s*•\s*Unit\s*\d+/i // "8 Algebra 1 • Unit 7 …" header line
       ];
 
       // 4) Build cleaned text per page
@@ -287,16 +337,10 @@ export default function PDFDictationReader() {
 
   const toggleSpeak = () => {
     if (!sentences.length) return;
-    if (isSpeaking) {
-      window.speechSynthesis.pause();
-      setIsSpeaking(false);
-    } else {
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-        setIsSpeaking(true);
-      } else {
-        startSpeakingFrom(currentSentence);
-      }
+    if (isSpeaking) { window.speechSynthesis.pause(); setIsSpeaking(false); }
+    else {
+      if (window.speechSynthesis.paused) { window.speechSynthesis.resume(); setIsSpeaking(true); }
+      else { startSpeakingFrom(currentSentence); }
     }
   };
 
@@ -322,7 +366,6 @@ export default function PDFDictationReader() {
       <div className="header">
         <div>
           <h1 className="title">Accessible PDF Dictation Reader</h1>
-          <p className="subtitle">Upload a PDF — it will extract text and read it aloud. Keyboard: Space / ← →</p>
         </div>
         <label className="btn" aria-label="Upload PDF">
           <input
@@ -376,14 +419,7 @@ export default function PDFDictationReader() {
 
               <label className="input" style={{ minWidth: 200 }}>
                 <span>Volume {volume.toFixed(1)}</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.1}
-                  value={volume}
-                  onChange={(e) => setVolume(parseFloat(e.target.value))}
-                />
+                <input type="range" min={0} max={1} step={0.1} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))}/>
               </label>
 
               {isLoading && <span className="pill">Extracting text…</span>}
@@ -402,9 +438,7 @@ export default function PDFDictationReader() {
                   tabIndex={0}
                   title="Click to speak (Ctrl/Cmd+Click to only select)"
                   onClick={(e) => speakAt(i, { selectOnly: e.ctrlKey || e.metaKey })}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); speakAt(i); }
-                  }}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); speakAt(i); } }}
                 >
                   <span className="badge">p{s.page}</span>
                   {s.text}
