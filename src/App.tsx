@@ -193,19 +193,19 @@ const fixInlineMathArtifacts = (line: string) => {
   fixed = fixed.replace(/(\d+)(?:\s*_+\s*)+(\d+)/g, "$1/$2");
 
   // 3) Merge powers when caret/digit are split: "x ^ 2" -> "x²"
-  fixed = fixed.replace(/([a-zA-Z])\s*\^\s*([0-9])\b/g, (m, v: string, pow: string) => {
-    const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
-    return v + (map[pow] || pow);
-  });
+  fixed = fixed.replace(/([a-zA-Z])\s*\^\s*([0-9])\b/g, (_match, v: string, pow: string) => {
+  const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
+  return v + (map[pow] || pow);
+});
 
   // 4) (… ) 2  -> (… )²   e.g., ( - 3 ) 2 -> ( - 3 )²
-  fixed = fixed.replace(/(\([^)]+\))\s*([0-9])\b/g, (m, base: string, pow: string) => {
-    const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
-    return base + (map[pow] || pow);
-  });
+  fixed = fixed.replace(/(\([^)]+\))\s*([0-9])\b/g, (_match, base: string, pow: string) => {
+  const map: Record<string,string> = { "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹" };
+  return base + (map[pow] || pow);
+});
 
   // 5) Inverse trig where the superscript minus gets dropped: "sin ¹(x)" -> "sin⁻¹(x)"
-  fixed = fixed.replace(/\b(sin|cos|tan)\s*¹\s*\(/gi, (m, fn) => `${fn}⁻¹(`);
+fixed = fixed.replace(/\b(sin|cos|tan)\s*¹\s*\(/gi, (_match, fn: string) => `${fn}⁻¹(`);
 
   // 6) Heuristics to restore missing minus in common patterns
   //    (2x  5) -> (2x - 5), (x  1) -> (x - 1), |x  4| -> |x - 4|
